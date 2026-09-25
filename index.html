@@ -145,6 +145,7 @@
     <div class="picks" id="horns"></div>
     <div class="how">
       <p><b>Change lanes:</b> swipe left or right, or use ← → / A D.</p>
+      <p><b>Gas:</b> hold W / ↑ to fill open space ahead.</p>
       <p><b>Brake:</b> hold the BRAKE button, or S / ↓.</p>
       <p><b>Merge:</b> only into a gap your ride fits.</p>
       <p><b>Honk:</b> Space or the HONK button.</p>
@@ -198,6 +199,10 @@ const CONFIG = {
   REAR_END_TIME: 4,       // hold the brake this long and the car behind rams you
   REAR_END_PENALTY: 3,    // seconds lost when you get rear-ended
   BRAKE_LOCK: 2,          // seconds the brake stops working after a rear-end
+  GAS_SPEED: 150,         // how fast the gas pedal moves you into open space ahead
+  SNAP: 12,               // if a gap is this close to lining up, you slide into it
+  TEXT_RAMP: 150,         // texts reach full annoyance by this many seconds
+  EXIT_HELP: 1200,        // near the exit, gaps open up toward the right lane
   LANE: 60                // lane width in world units
 };
 
@@ -381,7 +386,7 @@ function newGame(){
     lanes: [0,1,2,3].map(i => ({ i, offset:0, moving:false, remaining:0, speed:0, wait:rand(.2,2), cars:[] })),
     player: { lane:4, world:-330, rel:0, vis:4, from:4, to:4, mergeT:1, merging:false, shake:0 },
     exitStart: CONFIG.EXIT_AT, exitEnd: CONFIG.EXIT_AT + CONFIG.EXIT_LEN,
-    braking: false, brakeT: 0, behindHonkT: 0, brakeLock: 0, rearEnds: 0,
+    braking: false, brakeT: 0, behindHonkT: 0, brakeLock: 0, rearEnds: 0, gas: false, exitHelpT: 2, shoulderWrecks: [],
     nextText: 6, textsShown: 0, texts: [], threads: [], partnerCount: 0, partnerLimit: Math.random() < .5 ? 2 : 3,
     accident: null, police: null, tickets: 0, floats: [], pending: [],
     honks: 0, bumps: 0, exitT: 0, tutorHelpT: 3
@@ -404,7 +409,7 @@ function makeCar(){
 }
 function gapSize(){
   const need = V().len + 8;
-  if (Math.random() < (S.vehicle === 'truck' ? .45 : .3)) return rand(Math.max(18, need - 20), need - 3); // teaser: almost fits
+  if (Math.random() < (S.vehicle === 'truck' ? .45 : .3)) return rand(Math.max(18, V().len - 18), V().len - 4); // teaser: visibly a bit too small
   return rand(need + 2, need + 32);                                                                      // fits, barely
 }
 function spacingAfter(car){
@@ -457,9 +462,10 @@ function startMove(L, amt, speed, noRig){
     }
   }
   // Stop-and-go accordion: some cars start late, which opens a new gap
-  if (!L.lag && S.state === 'playing' && Math.random() < Math.min(.9, V().gaps * gapMult() * CONFIG.ACCORDION)){
+  const nearExit = nearExitZone() && L.i >= 2;
+  if (!L.lag && S.state === 'playing' && Math.random() < (nearExit ? .55 : Math.min(.9, V().gaps * gapMult() * CONFIG.ACCORDION))){
     const cands = L.cars.filter(c => !c.wreck && Math.abs(L.offset + c.base - p.world) < 380);
-    if (cands.length) L.lag = { split: pick(cands).base, left: gapSize() };
+    if (cands.length) L.lag = { split: pick(cands).base, left: nearExit ? rand(V().len + 12, V().len + 40) : gapSize() };
   }
   L.moving = true; L.remaining += amt; L.speed = Math.max(L.speed, speed * (S.vehicle === 'truck' ? 1.2 : 1));
 }
@@ -556,6 +562,20 @@ function npcMerges(dt){
     if (cands.length) npcLaneChange(A, pick(cands));
   }
 }
+function nearExitZone(){ const w = S.player.world; return w > S.exitStart - CONFIG.EXIT_HELP && w < S.exitEnd; }
+function exitHelp(dt){
+  // Near the exit, make sure a gap opens in the lane to your right
+  const p = S.player;
+  if (!nearExitZone() || p.lane >= 3) return;
+  S.exitHelpT -= dt; if (S.exitHelpT > 0) return;
+  S.exitHelpT = 5;
+  const R = S.lanes[p.lane + 1], need = V().len + 8;
+  const ok = gapsIn(R).some(g => g.end - g.start >= need && (g.start + g.end)/2 > p.world - 60 && (g.start + g.end)/2 < p.world + 240);
+  if (ok) return;
+  const cands = R.cars.filter(c => !c.wreck && !c.dx && R.offset + c.base > p.world + 60 && R.offset + c.base < p.world + 220);
+  if (cands.length && npcLaneChange(R, pick(cands))) return;
+  if (cands.length && !R.lag) R.lag = { split: cands[0].base, left: rand(V().len + 12, V().len + 40) }; // gap opens when that lane moves
+}
 function tutorialHelp(dt){
   // Secret tutorial: if no usable gap is coming, a neighbor car moves over and opens one ahead of you
   if (S.elapsed > CONFIG.TUTORIAL_TIME) return;
@@ -573,6 +593,17 @@ function tutorialHelp(dt){
 }
 
 /* ---------- player ---------- */
+// Find where you'd fit in a lane: right beside you, or slid a little into a gap that's almost lined up
+function mergeSpot(L, w, len){
+  if (fits(L, w, len)) return w;
+  let best = null;
+  for (const g of gapsIn(L)){
+    if (g.end - g.start < len + 2) continue;
+    const pos = clamp(w, g.start + len/2 + 1, g.end - len/2 - 1);
+    if (Math.abs(pos - w) <= CONFIG.SNAP && (best === null || Math.abs(pos - w) < Math.abs(best - w))) best = pos;
+  }
+  return best;
+}
 function beginMergeAnim(from, to){ const p = S.player; p.from = from; p.to = to; p.mergeT = 0; p.merging = true; }
 function tryMove(dir){
   if (!S || S.state !== 'playing') return;
@@ -588,9 +619,10 @@ function tryMove(dir){
     return;
   }
   const L = S.lanes[target];
-  if (!fits(L, p.world, len)){ bump(target); return; }
+  const spot = mergeSpot(L, p.world, len);
+  if (spot === null){ bump(target); return; }
   const old = p.lane;
-  p.lane = target; p.rel = p.world - L.offset;
+  p.lane = target; p.rel = spot - L.offset; p.world = spot;
   beginMergeAnim(old, target);
   if (Math.random() < CONFIG.GRASS_GREENER){ // the lane you left takes off (only the cars ahead of where you were)
     const OL = S.lanes[old], amt = rand(180,320);
@@ -626,7 +658,7 @@ function creepPlayer(dt){
   const ahead = L.cars.find(c => c.base > p.rel);
   if (!ahead) return;
   const room = (ahead.base - ahead.len/2) - (p.rel + V().len/2) - 8;
-  if (room > 0.5) p.rel += Math.min(room, CONFIG.PLAYER_CREEP*dt);
+  if (room > 0.5) p.rel += Math.min(room, (S.gas ? CONFIG.GAS_SPEED : CONFIG.PLAYER_CREEP)*dt);
 }
 function carBehind(){
   const p = S.player; if (p.lane > 3) return false;
@@ -674,8 +706,17 @@ function startAccident(){
   S.accident = { lane, time: rand(25,35) };
   spawnText('nav', 'Accident ahead. Everyone is slowing down to look. 👀');
 }
-function endAccident(){
-  const L = S.lanes[S.accident.lane];
+function accidentTick(dt){
+  const a = S.accident, L = S.lanes[a.lane], wreck = L.cars.find(c => c.wreck);
+  if (!wreck){ S.accident = null; return; }
+  const ww = L.offset + wreck.base, y = PY - (ww - S.player.world)*K;
+  a.time -= dt;
+  if (y > H + 90){ endAccident(false); return; }                 // scrolled off the bottom: gone
+  if (a.time <= 0 && ww > S.player.world + 20) endAccident(true); // still ahead of you: towed to the shoulder
+}
+function endAccident(tow){
+  const L = S.lanes[S.accident.lane], wreck = L.cars.find(c => c.wreck);
+  if (tow && wreck) S.shoulderWrecks.push({ world: L.offset + wreck.base, lane: S.accident.lane, slide: 0, c: wreck });
   L.cars = L.cars.filter(c => !c.wreck);
   S.accident = null;
 }
@@ -797,9 +838,10 @@ function textSpawner(dt){
   if (S.nextText > 0) return;
   const oldest = S.texts.length ? Math.min(...S.texts.map(r => r.t)) : S.elapsed;
   const ignoring = S.texts.length > 0 && S.elapsed - oldest > CONFIG.IGNORE_TIME;
-  const cap = ignoring ? CONFIG.MAX_TEXTS : 1 + Math.floor(phase()*3.99);
+  const ramp = clamp(S.elapsed / CONFIG.TEXT_RAMP, 0, 1);
+  const cap = ignoring ? CONFIG.MAX_TEXTS : 1 + Math.floor(ramp*3.99);
   if (S.texts.length < cap) spawnText();
-  S.nextText = ignoring ? rand(2, 3.5) : (12 - 8*phase()) * rand(.7, 1.3);
+  S.nextText = ignoring ? rand(2, 3.5) : (11 - 8*ramp) * rand(.7, 1.3);
 }
 function clearTexts(){ $('textLayer').innerHTML = ''; if (S){ S.texts = []; S.threads = []; } }
 
@@ -826,6 +868,7 @@ function update(dt){
     creepPlayer(dt);
     npcMerges(dt);
     tutorialHelp(dt);
+    exitHelp(dt);
     brakeHonks(dt);
   }
   if (p.lane < 4) p.world = S.lanes[p.lane].offset + p.rel;
@@ -844,7 +887,9 @@ function update(dt){
     followUps();
     updatePolice(dt);
     if (!S.accident && S.elapsed > 40 && Math.random() < dt*CONFIG.ACCIDENT_RATE) startAccident();
-    if (S.accident){ S.accident.time -= dt; if (S.accident.time <= 0) endAccident(); }
+    if (S.accident) accidentTick(dt);
+    S.shoulderWrecks.forEach(w => w.slide = Math.min(1, w.slide + dt/1.5));
+    S.shoulderWrecks = S.shoulderWrecks.filter(w => PY - (w.world - p.world)*K < H + 90);
     if (S.time <= 0){ S.time = 0; endGame('late'); }
     else if (p.lane < 4 && p.world - V().len/2 > S.exitEnd + 30) endGame('missed');
   }
@@ -1025,6 +1070,12 @@ function draw(){
       if (c.wreck) drawWreck(x, y, c);
       else drawVehicle(x + jit(c.seed, 9)*4, y, c.wid*K, c.len*K, c.seed, { semi:c.semi });
     });
+  });
+
+  // wrecks towed onto the shoulder stay until they scroll away
+  S.shoulderWrecks.forEach(w => {
+    const e = 1 - Math.pow(1 - w.slide, 3);
+    drawWreck(laneX(w.lane + (4 - w.lane)*e), sy(w.world), w.c);
   });
 
   // rubberneckers
@@ -1219,10 +1270,14 @@ window.addEventListener('keydown', e => {
   if (k === 'ArrowLeft' || k === 'a' || k === 'A'){ e.preventDefault(); if (!e.repeat) tryMove(-1); }
   if (k === 'ArrowRight' || k === 'd' || k === 'D'){ e.preventDefault(); if (!e.repeat) tryMove(1); }
   if (k === 'ArrowDown' || k === 's' || k === 'S'){ e.preventDefault(); setBrake(true); }
+  if (k === 'ArrowUp' || k === 'w' || k === 'W'){ e.preventDefault(); if (S) S.gas = true; }
   if (k === 'Enter' && $('title').classList.contains('show')) startGame();
 });
-window.addEventListener('keyup', e => { if (['ArrowDown','s','S'].includes(e.key)) setBrake(false); });
-window.addEventListener('blur', () => setBrake(false));
+window.addEventListener('keyup', e => {
+  if (['ArrowDown','s','S'].includes(e.key)) setBrake(false);
+  if (['ArrowUp','w','W'].includes(e.key) && S) S.gas = false;
+});
+window.addEventListener('blur', () => { setBrake(false); if (S) S.gas = false; });
 const brakeBtn = $('brake');
 brakeBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); try { brakeBtn.setPointerCapture(e.pointerId); } catch(_){} setBrake(true); });
 ['pointerup','pointercancel','lostpointercapture'].forEach(ev => brakeBtn.addEventListener(ev, () => setBrake(false)));
