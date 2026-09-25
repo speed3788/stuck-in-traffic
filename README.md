@@ -4,6 +4,7 @@ Get to your office exit in 5 minutes. Good luck.
 
 ## How to play
 - **Change lanes:** swipe left/right, or press ← → (or A / D)
+- **Gas:** hold the GAS button or W / ↑, or swipe up, to fill open space ahead
 - **Brake:** hold the BRAKE button, or S / ↓
 - **Merge:** only works if your vehicle fits the gap. Miss and you lose 3 seconds.
 - **Honk:** Space or the HONK button.

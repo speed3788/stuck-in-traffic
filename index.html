@@ -42,6 +42,8 @@
   .pedal.on,.pedal:active{transform:translate(4px,4px);box-shadow:none}
   #horn{right:calc(16px + env(safe-area-inset-right,0px))}
   #brake{left:calc(16px + env(safe-area-inset-left,0px))}
+  #gas{left:calc(16px + env(safe-area-inset-left,0px));bottom:calc(116px + env(safe-area-inset-bottom,0px))}
+  #gas.on{background:var(--ink);color:var(--paper)}
   #brake.on{background:var(--ink);color:var(--paper)}
 
   /* Texts */
@@ -132,6 +134,7 @@
 
 <div id="textLayer"></div>
 <div id="ticket"><div class="tt">TICKET 👮</div><div class="tm" id="ticketMsg"></div><div class="tp" id="ticketPen"></div></div>
+<button class="pedal" id="gas" aria-label="Hold for gas">GAS</button>
 <button class="pedal" id="brake" aria-label="Hold to brake">BRAKE</button>
 <button class="pedal" id="horn" aria-label="Honk the horn">HONK</button>
 
@@ -145,7 +148,7 @@
     <div class="picks" id="horns"></div>
     <div class="how">
       <p><b>Change lanes:</b> swipe left or right, or use ← → / A D.</p>
-      <p><b>Gas:</b> hold W / ↑ to fill open space ahead.</p>
+      <p><b>Gas:</b> hold the GAS button or W / ↑, or swipe up, to fill open space ahead.</p>
       <p><b>Brake:</b> hold the BRAKE button, or S / ↓.</p>
       <p><b>Merge:</b> only into a gap your ride fits.</p>
       <p><b>Honk:</b> Space or the HONK button.</p>
@@ -253,9 +256,12 @@ const SENDERS = {
   nav:      { from:'Navigation', icon:'🧭', weight:1, msgs:[
     'Faster route available. You have missed it.','Traffic ahead. Delay: yes.','Recalculating...'],
     follow:['Recalculating...','Recalculating...','Still recalculating...'] },
-  spam:     { from:'Unknown', icon:'🤖', weight:1, msgs:[
-    'We\'ve been trying to reach you about your car\'s extended warranty.','Your package could not be delivered.','Rate your commute! ⭐⭐⭐⭐⭐'],
+  spam:     { from:'Unknown', icon:'🤖', weight:.7, msgs:[
+    'We\'ve been trying to reach you about your car\'s extended warranty.','Rate your commute! ⭐⭐⭐⭐⭐'],
     follow:['Final notice.','FINAL final notice.','Reply STOP to stop. (It won\'t stop.)'] },
+  usp:      { from:'USP', icon:'📦', weight:.5, msgs:[
+    'Your package could not be delivered.'],
+    follow:['Delivery attempt #2 failed.','We left a note. You weren\'t home.','Your package is now stuck in traffic. Like you.'] },
   group:    { from:'Group chat (14)', icon:'💬', weight:1.1, msgs:[
     'lol','lol','LMAOOO','lol 💀','Sent you a meme - click to open','Sent you a meme - click to open'],
     follow:['lol','lol','lol'] },
@@ -386,7 +392,7 @@ function newGame(){
     lanes: [0,1,2,3].map(i => ({ i, offset:0, moving:false, remaining:0, speed:0, wait:rand(.2,2), cars:[] })),
     player: { lane:4, world:-330, rel:0, vis:4, from:4, to:4, mergeT:1, merging:false, shake:0 },
     exitStart: CONFIG.EXIT_AT, exitEnd: CONFIG.EXIT_AT + CONFIG.EXIT_LEN,
-    braking: false, brakeT: 0, behindHonkT: 0, brakeLock: 0, rearEnds: 0, gas: false, exitHelpT: 2, shoulderWrecks: [],
+    braking: false, brakeT: 0, behindHonkT: 0, brakeLock: 0, rearEnds: 0, gas: false, gasBurst: 0, exitHelpT: 2, shoulderWrecks: [],
     nextText: 6, textsShown: 0, texts: [], threads: [], partnerCount: 0, partnerLimit: Math.random() < .5 ? 2 : 3,
     accident: null, police: null, tickets: 0, floats: [], pending: [],
     honks: 0, bumps: 0, exitT: 0, tutorHelpT: 3
@@ -658,7 +664,7 @@ function creepPlayer(dt){
   const ahead = L.cars.find(c => c.base > p.rel);
   if (!ahead) return;
   const room = (ahead.base - ahead.len/2) - (p.rel + V().len/2) - 8;
-  if (room > 0.5) p.rel += Math.min(room, (S.gas ? CONFIG.GAS_SPEED : CONFIG.PLAYER_CREEP)*dt);
+  if (room > 0.5) p.rel += Math.min(room, ((S.gas || S.gasBurst > 0) ? CONFIG.GAS_SPEED : CONFIG.PLAYER_CREEP)*dt);
 }
 function carBehind(){
   const p = S.player; if (p.lane > 3) return false;
@@ -880,6 +886,7 @@ function update(dt){
     if (p.mergeT >= 1) p.merging = false;
   }
   p.shake = Math.max(0, p.shake - dt);
+  S.gasBurst = Math.max(0, S.gasBurst - dt);
 
   if (S.state === 'playing'){
     S.time -= dt; S.elapsed += dt;
@@ -1121,6 +1128,7 @@ function updateHUD(){
   $('progressCar').style.left = (f*100) + '%';
   $('progressExit').style.left = (S.exitStart/S.exitEnd*100) + '%';
   $('brake').classList.toggle('on', !!S.braking);
+  $('gas').classList.toggle('on', !!(S.gas || S.gasBurst > 0));
   $('brake').style.opacity = S.brakeLock > 0 ? .35 : 1;
 }
 
@@ -1128,7 +1136,7 @@ function updateHUD(){
    GAME FLOW
    ========================================================= */
 function show(id, on){ $(id).classList.toggle('show', on); }
-function setPedals(on){ $('horn').style.display = on ? 'block' : 'none'; $('brake').style.display = on ? 'block' : 'none'; }
+function setPedals(on){ ['horn','brake','gas'].forEach(id => $(id).style.display = on ? 'block' : 'none'); }
 function startGame(){
   audio();
   show('title', false); show('end', false);
@@ -1262,6 +1270,7 @@ window.addEventListener('pointerup', e => {
   if (!down) return; down = false;
   const dx = e.clientX - sx, dy = e.clientY - sy0;
   if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy)) tryMove(dx > 0 ? 1 : -1);
+  else if (dy < -30 && Math.abs(dy) > Math.abs(dx) && S && S.state === 'playing') S.gasBurst = .6; // swipe up: quick burst of gas
 });
 const setBrake = on => { if (S && (!on || (S.state === 'playing' && S.brakeLock <= 0))) S.braking = on; };
 window.addEventListener('keydown', e => {
@@ -1281,6 +1290,9 @@ window.addEventListener('blur', () => { setBrake(false); if (S) S.gas = false; }
 const brakeBtn = $('brake');
 brakeBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); try { brakeBtn.setPointerCapture(e.pointerId); } catch(_){} setBrake(true); });
 ['pointerup','pointercancel','lostpointercapture'].forEach(ev => brakeBtn.addEventListener(ev, () => setBrake(false)));
+const gasBtn = $('gas');
+gasBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); try { gasBtn.setPointerCapture(e.pointerId); } catch(_){} if (S) S.gas = true; });
+['pointerup','pointercancel','lostpointercapture'].forEach(ev => gasBtn.addEventListener(ev, () => { if (S) S.gas = false; }));
 $('horn').addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); honk(); });
 $('sick').addEventListener('click', () => { if (S && (S.state === 'playing' || S.state === 'intro')) endGame('sick'); });
 $('start').addEventListener('click', startGame);
